@@ -21,8 +21,9 @@ class PackingLogController extends Controller
         
         $avg_duration = round(PackingLog::avg('duration_seconds') ?? 0, 1);
         $recent_logs = PackingLog::orderBy('created_at', 'desc')->take(5)->get();
+        $today_count = PackingLog::whereDate('created_at', today())->count();
 
-        return view('dashboard', compact('total_count', 'total_size_mb', 'avg_duration', 'recent_logs'));
+        return view('dashboard', compact('total_count', 'total_size_mb', 'avg_duration', 'recent_logs', 'today_count'));
     }
 
     /**
@@ -33,12 +34,87 @@ class PackingLogController extends Controller
         $query = PackingLog::query();
 
         if ($request->filled('q')) {
-            $query->where('order_id', 'like', '%' . $request->q . '%');
+            $escapedQuery = str_replace(['%', '_'], ['\\%', '\\_'], $request->q);
+            $query->where('order_id', 'like', '%' . $escapedQuery . '%');
         }
 
         $logs = $query->orderBy('created_at', 'desc')->paginate(15);
 
         return response()->json($logs);
+    }
+
+    /**
+     * Get aggregate stats for dashboard.
+     */
+    public function stats()
+    {
+        $total_count = PackingLog::count();
+        $total_size_bytes = PackingLog::sum('file_size') ?? 0;
+        $total_size_mb = round($total_size_bytes / (1024 * 1024), 2);
+        
+        $avg_duration = round(PackingLog::avg('duration_seconds') ?? 0, 1);
+        $today_count = PackingLog::whereDate('created_at', today())->count();
+
+        return response()->json([
+            'total_count' => $total_count,
+            'total_size_mb' => $total_size_mb,
+            'avg_duration' => $avg_duration,
+            'today_count' => $today_count,
+        ]);
+    }
+
+    /**
+     * Export all logs to CSV.
+     */
+    public function export()
+    {
+        $fileName = 'packguard_logs_' . date('Ymd_His') . '.csv';
+        $logs = PackingLog::orderBy('created_at', 'desc')->get();
+
+        $headers = [
+            "Content-type"        => "text/csv",
+            "Content-Disposition" => "attachment; filename=$fileName",
+            "Pragma"              => "no-cache",
+            "Cache-Control"       => "must-revalidate, post-check=0, pre-check=0",
+            "Expires"             => "0"
+        ];
+
+        $columns = ['ID', 'Waktu', 'Order ID', 'Durasi (Detik)', 'Ukuran File (Bytes)', 'Nama Staf', 'File Path'];
+
+        $callback = function() use($logs, $columns) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, $columns);
+
+            foreach ($logs as $log) {
+                $row = [
+                    $log->id,
+                    $log->created_at,
+                    $log->order_id,
+                    $log->duration_seconds,
+                    $log->file_size,
+                    $log->staff_name,
+                    $log->file_path
+                ];
+                fputcsv($file, $row);
+            }
+
+            fclose($file);
+        };
+
+        return response()->stream($callback, 200, $headers);
+    }
+
+    /**
+     * Check if an order_id already exists in packing logs.
+     */
+    public function checkOrderExists($orderId)
+    {
+        $exists = PackingLog::where('order_id', strtoupper($orderId))->exists();
+
+        return response()->json([
+            'exists' => $exists,
+            'order_id' => strtoupper($orderId),
+        ]);
     }
 
     /**
@@ -125,16 +201,17 @@ class PackingLogController extends Controller
         $days = $request->input('days', 30);
         $cutoffDate = now()->subDays($days);
 
-        $expiredLogs = PackingLog::where('created_at', '<', $cutoffDate)->get();
         $deletedCount = 0;
 
-        foreach ($expiredLogs as $log) {
-            if (Storage::disk('public')->exists($log->file_path)) {
-                Storage::disk('public')->delete($log->file_path);
+        PackingLog::where('created_at', '<', $cutoffDate)->chunk(100, function ($expiredLogs) use (&$deletedCount) {
+            foreach ($expiredLogs as $log) {
+                if (Storage::disk('public')->exists($log->file_path)) {
+                    Storage::disk('public')->delete($log->file_path);
+                }
+                $log->delete();
+                $deletedCount++;
             }
-            $log->delete();
-            $deletedCount++;
-        }
+        });
 
         return response()->json([
             'success' => true,

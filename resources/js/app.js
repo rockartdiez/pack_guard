@@ -21,7 +21,7 @@ let animationFrameId = null;
 // Barcode Keyboard Wedge Buffer
 let barcodeBuffer = '';
 let lastKeyPressTime = 0;
-const BARCODE_INTERVAL_THRESHOLD = 30; // ms
+const BARCODE_INTERVAL_THRESHOLD = 100; // ms
 
 // DOM Elements
 let webcamElement = null;
@@ -40,10 +40,35 @@ let cameraSelect = null;
 let simulatedResiInput = null;
 let staffNameInput = null;
 let quickStatsTotal = null;
+let quickStatsToday = null;
 let quickStatsSize = null;
 let statsTotalLogs = null;
 let statsTotalSize = null;
 let statsAvgDuration = null;
+
+// IndexedDB for offline backup
+const DB_NAME = 'PackGuardDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'video_backups';
+let localDB = null;
+
+async function initLocalDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onerror = (event) => reject('IndexedDB error: ' + event.target.error);
+        request.onsuccess = (event) => {
+            localDB = event.target.result;
+            updatePendingUploadsUI();
+            resolve();
+        };
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+            }
+        };
+    });
+}
 
 // CSRF Token for HTTP Requests
 const getCsrfToken = () => {
@@ -56,6 +81,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initDOMElements();
     setupGlobalBarcodeListener();
     initCamera();
+    initLocalDB();
     
     // Load staff name from storage
     if (staffNameInput) {
@@ -65,20 +91,33 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function initTheme() {
     const theme = localStorage.getItem('packguard_theme') || 'dark';
-    if (theme === 'light') {
-        document.documentElement.classList.remove('bg-slate-950', 'text-slate-100');
-        document.documentElement.classList.add('bg-white', 'text-slate-900', 'light');
+    if (theme === 'dark') {
+        document.documentElement.classList.add('dark');
     } else {
-        document.documentElement.classList.add('bg-slate-950', 'text-slate-100');
-        document.documentElement.classList.remove('bg-white', 'text-slate-900', 'light');
+        document.documentElement.classList.remove('dark');
+    }
+    
+    // Highlight active theme button if they exist
+    const btnDark = document.getElementById('theme-dark-btn');
+    const btnLight = document.getElementById('theme-light-btn');
+    if (btnDark && btnLight) {
+        if (theme === 'dark') {
+            btnDark.classList.add('pg-btn-active');
+            btnDark.classList.remove('pg-btn-primary');
+            btnLight.classList.add('pg-btn-primary');
+            btnLight.classList.remove('pg-btn-active');
+        } else {
+            btnLight.classList.add('pg-btn-active');
+            btnLight.classList.remove('pg-btn-primary');
+            btnDark.classList.add('pg-btn-primary');
+            btnDark.classList.remove('pg-btn-active');
+        }
     }
 }
 
 window.toggleTheme = function(theme) {
     localStorage.setItem('packguard_theme', theme);
     initTheme();
-    // Force a small refresh of classes on specific elements if needed
-    location.reload(); // Simplest way to ensure all Tailwind colors re-apply correctly
 };
 
 function initDOMElements() {
@@ -98,6 +137,7 @@ function initDOMElements() {
     simulatedResiInput = document.getElementById('simulatedResiInput');
     staffNameInput = document.getElementById('staffNameInput');
     quickStatsTotal = document.getElementById('quickStatsTotal');
+    quickStatsToday = document.getElementById('quickStatsToday');
     quickStatsSize = document.getElementById('quickStatsSize');
     statsTotalLogs = document.getElementById('statsTotalLogs');
     statsTotalSize = document.getElementById('statsTotalSize');
@@ -188,10 +228,10 @@ function updateCameraIndicator(connected, message) {
     if (!cameraStatusIndicator) return;
     
     if (connected) {
-        cameraStatusIndicator.className = 'flex items-center space-x-2 px-3 py-1.5 rounded-full bg-emerald-950/40 border border-emerald-900/50 text-xs font-semibold text-emerald-400';
-        cameraStatusIndicator.querySelector('span').className = 'h-2 w-2 rounded-full bg-emerald-400';
+        cameraStatusIndicator.className = 'pg-badge-emerald flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-semibold';
+        cameraStatusIndicator.querySelector('span').className = 'h-2 w-2 rounded-full bg-emerald-500';
     } else {
-        cameraStatusIndicator.className = 'flex items-center space-x-2 px-3 py-1.5 rounded-full bg-red-950/40 border border-red-900/50 text-xs font-semibold text-red-400';
+        cameraStatusIndicator.className = 'pg-badge-red flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-semibold';
         cameraStatusIndicator.querySelector('span').className = 'h-2 w-2 rounded-full bg-red-500 animate-pulse';
     }
     cameraStatusIndicator.querySelector('span').nextElementSibling.innerText = message;
@@ -215,26 +255,26 @@ function startCanvasLoop() {
         const now = new Date();
         const dateStr = now.toISOString().replace('T', ' ').substring(0, 19);
 
-        // Overlay text panel background (Larger & More Opaque)
+        // Overlay text panel background (Top-Left Position)
         ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-        ctx.fillRect(30, canvasHeight - 160, 500, 130);
+        ctx.fillRect(30, 20, 500, 130);
         ctx.strokeStyle = 'rgba(99, 102, 241, 0.6)';
         ctx.lineWidth = 3;
-        ctx.strokeRect(30, canvasHeight - 160, 500, 130);
+        ctx.strokeRect(30, 20, 500, 130);
 
         // Render Watermark Texts (Larger Fonts)
         ctx.font = 'bold 20px "Plus Jakarta Sans", sans-serif';
         ctx.fillStyle = '#818cf8'; // Indigo-400
-        ctx.fillText('PACKGUARD AI - SECURITY PROOF', 50, canvasHeight - 130);
+        ctx.fillText('PACKGUARD AI - SECURITY PROOF', 50, 50);
 
         ctx.font = 'bold 18px "Courier New", monospace';
         ctx.fillStyle = '#ffffff'; // White for better contrast
-        ctx.fillText(`ORDER ID  : ${currentOrderId || 'IDLE (NO SCAN)'}`, 50, canvasHeight - 100);
+        ctx.fillText(`ORDER ID  : ${currentOrderId || 'IDLE (NO SCAN)'}`, 50, 80);
         
         ctx.font = '16px "Courier New", monospace';
         ctx.fillStyle = '#e2e8f0'; // Slate-200
-        ctx.fillText(`TIMESTAMP : ${dateStr}`, 50, canvasHeight - 75);
-        ctx.fillText(`OPERATOR  : ${staffName.toUpperCase()}`, 50, canvasHeight - 50);
+        ctx.fillText(`TIMESTAMP : ${dateStr}`, 50, 105);
+        ctx.fillText(`OPERATOR  : ${staffName.toUpperCase()}`, 50, 130);
 
         // Render pulsing red recording indicator overlay on canvas when recording
         if (isRecording) {
@@ -285,10 +325,8 @@ function getSupportedMimeType() {
 
 function startRecording(orderId) {
     if (isRecording) {
-        // If recording active, stop previous and auto queue new
-        stopRecording(() => {
-            setTimeout(() => startRecording(orderId), 300);
-        });
+        // Already recording — this shouldn't happen with the new flow, but guard anyway
+        console.warn('[PackGuard] startRecording dipanggil saat sedang merekam. Diabaikan.');
         return;
     }
 
@@ -299,8 +337,11 @@ function startRecording(orderId) {
 
     // Clean order id
     currentOrderId = orderId.trim().toUpperCase();
+    window.currentOrderId = currentOrderId; // Expose for emulator button
     isRecording = true;
     recordingStartTime = Date.now();
+    
+    if (window.playStartBeep) window.playStartBeep();
     recordedChunks = [];
 
     // Capture 24 FPS stream from Canvas
@@ -320,10 +361,12 @@ function startRecording(orderId) {
         }
     };
 
+    const activeOrderId = currentOrderId;
+
     mediaRecorder.onstop = () => {
         const durationSeconds = Math.round((Date.now() - recordingStartTime) / 1000);
         const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/webm' });
-        uploadRecordedVideo(blob, currentOrderId, durationSeconds);
+        uploadRecordedVideo(blob, activeOrderId, durationSeconds);
     };
 
     // Start recording, slices of 1s
@@ -353,6 +396,8 @@ function stopRecording(callback = null) {
         return;
     }
 
+    if (window.playStopBeep) window.playStopBeep();
+
     isRecording = false;
     
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
@@ -361,6 +406,9 @@ function stopRecording(callback = null) {
 
     // Reset UI Status
     updateUIToIdle();
+    
+    currentOrderId = '';
+    window.currentOrderId = '';
     
     if (timerInterval) {
         clearInterval(timerInterval);
@@ -425,7 +473,99 @@ function updateUIToIdle() {
 
 // ================= MULTIPART UPLOAD SERVICE =================
 
-async function uploadRecordedVideo(blob, orderId, durationSeconds) {
+async function saveVideoLocally(orderId, blob, durationSeconds) {
+    if (!localDB) return null;
+    return new Promise((resolve, reject) => {
+        const transaction = localDB.transaction([STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(STORE_NAME);
+        const backupId = orderId + '_' + Date.now();
+        const item = {
+            id: backupId,
+            orderId: orderId,
+            blob: blob,
+            durationSeconds: durationSeconds,
+            staffName: staffNameInput?.value || staffName,
+            timestamp: Date.now()
+        };
+        const request = store.put(item);
+        request.onsuccess = () => resolve(backupId);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function removeLocalVideo(backupId) {
+    if (!localDB) return;
+    return new Promise((resolve, reject) => {
+        const transaction = localDB.transaction([STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.delete(backupId);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function getPendingUploads() {
+    if (!localDB) return [];
+    return new Promise((resolve, reject) => {
+        const transaction = localDB.transaction([STORE_NAME], 'readonly');
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+window.retryPendingUploads = async function() {
+    const pending = await getPendingUploads();
+    if (pending.length === 0) return;
+    
+    alert(`Mencoba upload ulang ${pending.length} video...`);
+    for (const item of pending) {
+        await uploadRecordedVideo(item.blob, item.orderId, item.durationSeconds, item.id);
+    }
+};
+
+async function updatePendingUploadsUI() {
+    const pending = await getPendingUploads();
+    let container = document.getElementById('pendingUploadsContainer');
+    
+    if (pending.length === 0) {
+        if (container) container.classList.add('hidden');
+        return;
+    }
+    
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'pendingUploadsContainer';
+        container.className = 'fixed bottom-6 right-6 z-[9999] p-4 rounded-xl bg-amber-950/90 border border-amber-700/60 backdrop-blur-md shadow-lg flex items-center space-x-4';
+        
+        container.innerHTML = `
+            <div>
+                <div class="text-amber-200 font-bold text-sm">Upload Tertunda (<span id="pendingCount">0</span>)</div>
+                <div class="text-xs text-amber-400/80">Video tersimpan lokal karena gagal upload.</div>
+            </div>
+            <button onclick="retryPendingUploads()" class="bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shadow-md">
+                Coba Lagi
+            </button>
+        `;
+        document.body.appendChild(container);
+    }
+    
+    container.classList.remove('hidden');
+    document.getElementById('pendingCount').innerText = pending.length;
+}
+
+async function uploadRecordedVideo(blob, orderId, durationSeconds, backupId = null) {
+    if (window.showToast) window.showToast('Mengupload video...', 'info');
+    
+    if (!backupId) {
+        try {
+            backupId = await saveVideoLocally(orderId, blob, durationSeconds);
+        } catch (e) {
+            console.error('Failed to backup locally:', e);
+        }
+    }
+
     const formData = new FormData();
     formData.append('video', blob, `${orderId}.webm`);
     formData.append('order_id', orderId);
@@ -445,17 +585,20 @@ async function uploadRecordedVideo(blob, orderId, durationSeconds) {
         
         if (data.success) {
             console.log('Upload success:', data.log);
-            // Append record to local packing station logs table instantly
+            if (backupId) await removeLocalVideo(backupId);
             addLogToRecentTable(data.log);
-            // Refresh stats & general lists
             refreshStats();
+            updatePendingUploadsUI();
+            if (window.showToast) window.showToast(`✅ Rekaman disimpan: ${orderId}`, 'success');
         } else {
             console.error('Upload failed:', data.message);
-            alert('Upload gagal: ' + data.message);
+            alert('Upload gagal: ' + data.message + '\nVideo disimpan sementara di perangkat Anda.');
+            updatePendingUploadsUI();
         }
     } catch (e) {
         console.error('Upload network error:', e);
-        alert('Terjadi kesalahan jaringan saat mengunggah video.');
+        alert('Terjadi kesalahan jaringan saat mengunggah video.\nVideo disimpan sementara di perangkat Anda dan dapat di-retry nanti.');
+        updatePendingUploadsUI();
     }
 }
 
@@ -463,53 +606,63 @@ function addLogToRecentTable(log) {
     if (!recentPackingLogsBody) return;
     
     // Remove "No records" row if present
-    if (recentPackingLogsBody.innerText.includes('Belum ada sesi packing')) {
+    if (recentPackingLogsBody.innerText.includes('Belum ada riwayat hari ini')) {
         recentPackingLogsBody.innerHTML = '';
     }
 
-    const row = document.createElement('tr');
-    row.className = 'border-b border-slate-900/60 hover:bg-slate-900/20 text-slate-300 transition-colors';
+    const card = document.createElement('div');
+    card.className = 'pg-session-card rounded-xl p-3.5 flex flex-col space-y-2.5';
     
-    const timeFormatted = new Date(log.created_at).toLocaleString();
+    const timeObj = new Date(log.created_at);
+    const timeFormatted = String(timeObj.getHours()).padStart(2, '0') + ':' + String(timeObj.getMinutes()).padStart(2, '0');
     const sizeMb = (log.file_size / (1024 * 1024)).toFixed(2);
     const videoUrl = `/storage/${log.file_path}`;
 
-    row.innerHTML = `
-        <td class="py-3 font-medium">${timeFormatted}</td>
-        <td class="py-3 font-bold text-slate-100">${log.order_id}</td>
-        <td class="py-3">${log.duration_seconds} Detik</td>
-        <td class="py-3">${sizeMb} MB</td>
-        <td class="py-3 text-slate-400">${log.staff_name}</td>
-        <td class="py-3 text-right">
-            <button onclick="playVideo('${videoUrl}', '${log.order_id}')" class="text-indigo-400 hover:text-indigo-300 font-semibold inline-flex items-center space-x-1">
-                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                <span>Play</span>
+    card.innerHTML = `
+        <div class="flex justify-between items-start">
+            <div>
+                <div class="flex items-center space-x-2">
+                    <span class="pg-session-badge text-[10px] px-1.5 py-0.5 rounded font-medium">${timeFormatted}</span>
+                    <span class="text-xs pg-text-muted font-medium truncate max-w-[80px]">${log.staff_name}</span>
+                </div>
+                <div class="font-bold pg-text-primary text-sm mt-1.5">${log.order_id}</div>
+            </div>
+            <button onclick="playVideo('${videoUrl}', '${log.order_id}')" class="pg-btn-primary p-2 rounded-lg transition-colors shadow-sm" title="Putar Rekaman">
+                <svg class="h-4 w-4 text-indigo-500 dark:text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
             </button>
-        </td>
+        </div>
+        <div class="pg-session-meta flex justify-between text-[10px] font-medium pt-2.5">
+            <span class="flex items-center space-x-1">
+                <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                <span>${log.duration_seconds}s</span>
+            </span>
+            <span class="flex items-center space-x-1">
+                <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>
+                <span>${sizeMb} MB</span>
+            </span>
+        </div>
     `;
     
-    recentPackingLogsBody.insertBefore(row, recentPackingLogsBody.firstChild);
+    // Prepend new row
+    recentPackingLogsBody.insertBefore(card, recentPackingLogsBody.firstChild);
 }
 
 // Refresh stats panels
 async function refreshStats() {
     try {
-        const response = await fetch('/api/logs?q=');
+        const response = await fetch('/api/stats');
         const data = await response.json();
         
-        // Update stats widgets on the sidebar and stats tab
-        const total = data.total;
+        if (quickStatsTotal) quickStatsTotal.innerText = data.total_count;
+        if (quickStatsToday) quickStatsToday.innerText = data.today_count;
+        if (quickStatsSize) quickStatsSize.innerText = data.total_size_mb + ' MB';
         
-        if (quickStatsTotal) quickStatsTotal.innerText = total;
-        if (statsTotalLogs) statsTotalLogs.innerText = total;
-
-        // Calculate size dynamically
-        const logsResponse = await fetch('/api/logs');
-        const logsData = await logsResponse.json();
-        
-        // Sum total size from pagination data if supported or recalculate
-        // For accurate recalculation, reload the full page data
-        // Let's reload dashboard metrics by triggering inline request or let them refresh on tab switch.
+        if (statsTotalLogs) statsTotalLogs.innerText = data.total_count;
+        if (statsTotalSize) statsTotalSize.innerText = data.total_size_mb;
+        if (statsAvgDuration) statsAvgDuration.innerText = data.avg_duration;
     } catch (e) {
         console.warn('Failed to refresh stats:', e);
     }
@@ -519,6 +672,13 @@ async function refreshStats() {
 
 function setupGlobalBarcodeListener() {
     window.addEventListener('keydown', (event) => {
+        // Check if modal is open and key is ESC
+        const modal = document.getElementById('videoModal');
+        if (event.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
+            window.closeVideoModal();
+            return;
+        }
+
         // Prevent listening if typing in inputs
         const target = event.target;
         if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
@@ -542,10 +702,6 @@ function setupGlobalBarcodeListener() {
             if (barcodeBuffer.length >= 3) {
                 // If there is a barcode in buffer, process it
                 handleBarcodeScanned(barcodeBuffer);
-            } else if (isRecording) {
-                // If buffer is empty but we are recording, treat Enter as a manual STOP command
-                console.log('Manual STOP triggered via ENTER key');
-                stopRecording();
             }
             
             barcodeBuffer = '';
@@ -560,74 +716,107 @@ function setupGlobalBarcodeListener() {
     });
 }
 
-function handleBarcodeScanned(code) {
+async function handleBarcodeScanned(code) {
     console.log('Barcode Scanned:', code);
     const cleanedCode = code.trim().toUpperCase();
 
-    if (cleanedCode === 'STOP_PACKING' || cleanedCode === 'STOP') {
-        stopRecording();
+    if (isRecording) {
+        // If scanning the SAME barcode as the current recording → stop recording
+        if (cleanedCode === currentOrderId) {
+            console.log(`[PackGuard] Scan STOP — resi "${cleanedCode}" cocok, menghentikan rekaman.`);
+            stopRecording();
+        } else {
+            // Different barcode while recording → ignore
+            console.log(`[PackGuard] Scan DIABAIKAN — sedang merekam "${currentOrderId}", scan resi berbeda: "${cleanedCode}"`);
+            showScanIgnoredNotification(cleanedCode);
+        }
     } else {
+        // Not recording → check if resi already exists in database before starting
+        console.log(`[PackGuard] Checking if resi "${cleanedCode}" already exists...`);
+        if (window.showToast) window.showToast(`Mendeteksi scan: ${cleanedCode}...`, 'info');
+        
+        try {
+            const response = await fetch(`/api/logs/check/${encodeURIComponent(cleanedCode)}`);
+            const data = await response.json();
+            
+            if (data.exists) {
+                console.log(`[PackGuard] DITOLAK — resi "${cleanedCode}" sudah terdaftar di database.`);
+                showDuplicateResiNotification(cleanedCode);
+                return;
+            }
+        } catch (e) {
+            console.warn('[PackGuard] Gagal mengecek duplikat resi, melanjutkan rekaman:', e);
+            // If network check fails, allow recording to proceed (fail-open)
+        }
+
+        console.log(`[PackGuard] Scan START — memulai rekaman untuk resi "${cleanedCode}"`);
         startRecording(cleanedCode);
     }
 }
 
-// Manual Actions & Simulated Scan from Form
-window.triggerManualSimulatedScan = function() {
-    if (!simulatedResiInput) return;
-    const value = simulatedResiInput.value.trim();
-    if (!value) return;
+// Show notification when a resi is already registered in the database (duplicate rejected)
+function showDuplicateResiNotification(duplicateCode) {
+    if (window.playErrorBeep) window.playErrorBeep();
     
-    handleBarcodeScanned(value);
-    simulatedResiInput.value = '';
-};
+    // Remove existing notifications
+    const existing = document.getElementById('scanIgnoredNotification');
+    if (existing) existing.remove();
+    const existingDup = document.getElementById('scanDuplicateNotification');
+    if (existingDup) existingDup.remove();
 
-// Emulate hardware speed keystroke input
-window.emulateHardwareScan = function(code) {
-    let index = 0;
-    barcodeBuffer = '';
-    lastKeyPressTime = Date.now();
+    const notification = document.createElement('div');
+    notification.id = 'scanDuplicateNotification';
+    notification.className = 'fixed top-6 left-1/2 -translate-x-1/2 z-[9999] px-5 py-3 rounded-xl bg-red-950/90 border border-red-700/60 backdrop-blur-md shadow-lg shadow-red-950/30 text-red-300 text-sm font-semibold flex items-center space-x-3';
+    notification.innerHTML = `
+        <svg class="h-5 w-5 text-red-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+        </svg>
+        <div>
+            <div class="text-red-200 font-bold">Rekaman Ditolak — Resi Sudah Terdaftar</div>
+            <div class="text-xs text-red-400/80 mt-0.5">Resi <strong>"${duplicateCode}"</strong> sudah memiliki rekaman video di database. Tidak dapat merekam ulang.</div>
+        </div>
+    `;
+    document.body.appendChild(notification);
 
-    function typeNextChar() {
-        if (index < code.length) {
-            const char = code[index];
-            const event = new KeyboardEvent('keydown', {
-                key: char,
-                bubbles: true,
-                cancelable: true
-            });
-            
-            // Set timestamp slightly manually
-            lastKeyPressTime = Date.now();
-            window.dispatchEvent(event);
-            
-            index++;
-            setTimeout(typeNextChar, 5); // 5ms delay (mimics fast scanner wedge)
-        } else {
-            // Send final enter key
-            setTimeout(() => {
-                const enterEvent = new KeyboardEvent('keydown', {
-                    key: 'Enter',
-                    bubbles: true,
-                    cancelable: true
-                });
-                lastKeyPressTime = Date.now();
-                window.dispatchEvent(enterEvent);
-            }, 5);
-        }
-    }
-    
-    typeNextChar();
-};
+    // Auto-remove after 5 seconds
+    setTimeout(() => {
+        notification.style.opacity = '0';
+        notification.style.transform = 'translate(-50%, -20px)';
+        notification.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
+        setTimeout(() => notification.remove(), 400);
+    }, 5000);
+}
 
-window.manualStartRecording = function() {
-    const simulatedInput = document.getElementById('simulatedResiInput');
-    const orderId = simulatedInput?.value.trim() || 'MANUAL_' + Math.round(Math.random() * 100000);
-    startRecording(orderId);
-};
+// Show a brief on-screen notification when a different barcode is scanned while recording
+function showScanIgnoredNotification(ignoredCode) {
+    // Remove existing notification if any
+    const existing = document.getElementById('scanIgnoredNotification');
+    if (existing) existing.remove();
+    const existingDup = document.getElementById('scanDuplicateNotification');
+    if (existingDup) existingDup.remove();
 
-window.manualStopRecording = function() {
-    stopRecording();
-};
+    const notification = document.createElement('div');
+    notification.id = 'scanIgnoredNotification';
+    notification.className = 'fixed top-6 left-1/2 -translate-x-1/2 z-[9999] px-5 py-3 rounded-xl bg-amber-950/90 border border-amber-700/60 backdrop-blur-md shadow-lg shadow-amber-950/30 text-amber-300 text-sm font-semibold flex items-center space-x-3';
+    notification.innerHTML = `
+        <svg class="h-5 w-5 text-amber-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+        </svg>
+        <div>
+            <div class="text-amber-200">Scan Diabaikan</div>
+            <div class="text-xs text-amber-400/80 mt-0.5">Resi <strong>"${ignoredCode}"</strong> diabaikan. Scan <strong>"${currentOrderId}"</strong> untuk menghentikan rekaman saat ini.</div>
+        </div>
+    `;
+    document.body.appendChild(notification);
+
+    // Auto-remove after 4 seconds
+    setTimeout(() => {
+        notification.style.opacity = '0';
+        notification.style.transform = 'translate(-50%, -20px)';
+        notification.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
+        setTimeout(() => notification.remove(), 400);
+    }, 4000);
+}
 
 // ================= TABS SWITCHER & LOG TABLE LOGIC =================
 
@@ -645,19 +834,18 @@ window.switchTab = function(tabName) {
     const navBtnLogs = document.getElementById('nav-logs');
     const navBtnSettings = document.getElementById('nav-settings');
     
-    const inactiveClass = "w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 text-slate-400 hover:text-slate-200 hover:bg-slate-900/60 border border-transparent";
-    const activeClass = "w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 bg-gradient-to-r from-indigo-950 to-indigo-900/40 border border-indigo-800/40 text-white shadow-md shadow-indigo-950/20";
+    const baseClass = "pg-nav-item w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-semibold";
     
-    navBtnPacking.className = inactiveClass;
-    navBtnPacking.querySelector('svg').className = "h-5 w-5 text-slate-500";
-    navBtnLogs.className = inactiveClass;
-    navBtnLogs.querySelector('svg').className = "h-5 w-5 text-slate-500";
-    navBtnSettings.className = inactiveClass;
-    navBtnSettings.querySelector('svg').className = "h-5 w-5 text-slate-500";
+    navBtnPacking.className = baseClass;
+    navBtnPacking.querySelector('svg').className = "h-5 w-5";
+    navBtnLogs.className = baseClass;
+    navBtnLogs.querySelector('svg').className = "h-5 w-5";
+    navBtnSettings.className = baseClass;
+    navBtnSettings.querySelector('svg').className = "h-5 w-5";
     
     const activeBtn = document.getElementById(`nav-${tabName}`);
-    activeBtn.className = activeClass;
-    activeBtn.querySelector('svg').className = "h-5 w-5 text-indigo-400";
+    activeBtn.className = baseClass + " active";
+    activeBtn.querySelector('svg').className = "h-5 w-5";
     
     // Load logs if logs tab selected
     if (tabName === 'logs') {
@@ -666,10 +854,14 @@ window.switchTab = function(tabName) {
 };
 
 let currentSearchQuery = '';
+let searchTimeout = null;
 
 window.handleSearchLogs = function(query) {
     currentSearchQuery = query;
-    loadLogsTable(1);
+    if (searchTimeout) clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+        loadLogsTable(1);
+    }, 500);
 };
 
 async function loadLogsTable(page = 1) {
@@ -745,7 +937,7 @@ function renderPagination(data) {
     if (data.prev_page_url) {
         const prevBtn = document.createElement('button');
         prevBtn.innerText = 'Sebelumnya';
-        prevBtn.className = 'px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg hover:bg-slate-800 transition-all';
+        prevBtn.className = 'pg-btn-primary px-3 py-1.5 rounded-lg';
         prevBtn.onclick = () => loadLogsTable(data.current_page - 1);
         buttons.appendChild(prevBtn);
     }
@@ -753,7 +945,7 @@ function renderPagination(data) {
     if (data.next_page_url) {
         const nextBtn = document.createElement('button');
         nextBtn.innerText = 'Berikutnya';
-        nextBtn.className = 'px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg hover:bg-slate-800 transition-all';
+        nextBtn.className = 'pg-btn-primary px-3 py-1.5 rounded-lg';
         nextBtn.onclick = () => loadLogsTable(data.current_page + 1);
         buttons.appendChild(nextBtn);
     }
@@ -853,4 +1045,70 @@ window.closeVideoModal = function() {
     setTimeout(() => {
         modal.classList.add('hidden');
     }, 300);
+};
+
+// ================= UX & AUDIO FEEDBACK =================
+
+const beep = (freq, duration, type='sine') => {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = type;
+        osc.frequency.value = freq;
+        osc.start();
+        gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + duration/1000);
+        setTimeout(() => { osc.stop(); ctx.close(); }, duration);
+    } catch (e) { console.warn('Audio not supported', e) }
+};
+
+window.playStartBeep = () => beep(800, 200, 'sine');
+window.playStopBeep = () => { beep(400, 150, 'sine'); setTimeout(() => beep(400, 200, 'sine'), 200); };
+window.playErrorBeep = () => beep(200, 500, 'sawtooth');
+
+window.showToast = function(message, type = 'info') {
+    let container = document.getElementById('toastContainer');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'toastContainer';
+        container.className = 'fixed top-6 right-6 z-[9999] flex flex-col space-y-2';
+        document.body.appendChild(container);
+    }
+    
+    const toast = document.createElement('div');
+    
+    let bgClass = 'bg-slate-900 border-slate-700 text-white';
+    if (type === 'success') bgClass = 'bg-emerald-950 border-emerald-800 text-emerald-400';
+    if (type === 'error') bgClass = 'bg-red-950 border-red-800 text-red-400';
+    if (type === 'warning') bgClass = 'bg-amber-950 border-amber-800 text-amber-400';
+    
+    toast.className = `px-4 py-3 rounded-xl border backdrop-blur-md shadow-lg transform transition-all duration-300 translate-x-full opacity-0 ${bgClass} text-sm font-semibold flex items-center space-x-2`;
+    toast.innerHTML = `<span>${message}</span>`;
+    
+    container.appendChild(toast);
+    
+    setTimeout(() => {
+        toast.classList.remove('translate-x-full', 'opacity-0');
+    }, 50);
+    
+    setTimeout(() => {
+        toast.classList.add('opacity-0', 'translate-x-full');
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+};
+
+// ================= FULLSCREEN =================
+window.toggleFullscreen = function() {
+    const elem = document.getElementById('videoViewport');
+    if (!elem) return;
+    
+    if (!document.fullscreenElement) {
+        elem.requestFullscreen().catch((err) => {
+            console.warn(`Error attempting to enable fullscreen: ${err.message}`);
+        });
+    } else {
+        document.exitFullscreen();
+    }
 };
